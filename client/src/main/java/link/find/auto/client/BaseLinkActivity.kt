@@ -5,10 +5,7 @@ import android.os.Bundle
 import android.support.v7.app.AppCompatActivity
 import android.view.Gravity
 import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.ScrollView
-import android.widget.TextView
+import android.widget.*
 import book.hill.gxd.voice.SimpleRecognition
 import org.jetbrains.anko.*
 import org.jetbrains.anko.sdk25.coroutines.onClick
@@ -52,6 +49,7 @@ open class BaseLinkActivity : AppCompatActivity() {
 
     //region    speech
     private lateinit var recog: SimpleRecognition
+    private lateinit var recogTrackInMs:TextView
     private lateinit var recogText:TextView
     private lateinit var recogName:TextView
     private var isSpeechWorking = false
@@ -86,6 +84,8 @@ open class BaseLinkActivity : AppCompatActivity() {
             return
         }
 
+        var btnTemp1:Button? = null
+
         verticalLayout {
 
             recogText = textView {
@@ -98,44 +98,68 @@ open class BaseLinkActivity : AppCompatActivity() {
                     textSize = sp(8).toFloat()
                 }.lparams(matchParent, matchParent)
             }.lparams(matchParent, dip(100))
-            button("Load"){
-                onClick {
-                    if(!isSpeechWorking) {
-                        recog = SimpleRecognition(this@BaseLinkActivity).apply {
-                            setOnResult { no, text ->
-                                recogText.text = "${no}. $text"
+            verticalLayout {
+                orientation = LinearLayout.HORIZONTAL
+                button("Load"){
+                    onClick {
+                        if(!isSpeechWorking) {
+                            recog = SimpleRecognition(this@BaseLinkActivity).apply {
+                                setOnResult { no, text ->
+                                    recogText.text = "${no}. $text"
+                                }
+                                setOnName { no, text ->
+                                    recogName.text = "${recogName.text}${no}. $text\n"
+                                }
                             }
-                            setOnName { no, text ->
-                                recogName.text = "${recogName.text}${no}. $text\n"
-                            }
+                            clearText()
+                            recog.starApp()
+                            isSpeechWorking = true
                         }
-                        clearText()
-                        recog.starApp()
-                        isSpeechWorking = true
                     }
                 }
-            }
-            button("Close"){
-                onClick {
-                    if (isSpeechWorking) {
-                        isSpeechWorking = false
-                        clearText()
-                        recog.dispose()
+                button("Close"){
+                    onClick {
+                        if (isSpeechWorking) {
+                            isSpeechWorking = false
+                            clearText()
+                            recog.dispose()
+                        }
                     }
                 }
-            }
+            }.lparams(matchParent, wrapContent)
+            recogTrackInMs = editText {
+                setText("1500")
+            }.lparams(matchParent, wrapContent)
             etText = editText {
                 hint = "发送内容"
             }.lparams(matchParent, wrapContent)
-            btnSend = button("发送") {
-                isEnabled = false
-                onClick {
-                    doAsync {
-                        val isSendOk = sendAppData(etText.text.toString().trim())
-                        logLine(if (isSendOk) "发送成功" else sendError)
+            verticalLayout {
+                orientation = LinearLayout.HORIZONTAL
+                btnTemp1 = button("开启检测"){
+                    onClick {
+                        // 开启
+                        if (appSocket.canWork){
+                            appSocket.resetReceive()
+                            logLine("启动应用接收 ${appSocket.addr}:${appSocket.port}")
+                        }
+                        if (groupSocket.canWork){
+                            groupSocket.resetSend()
+                            logLine("启动组播接收 ${CommConfig.groupIp}:${CommConfig.groupPort}")
+                        }
+                        btnTemp1?.isEnabled = false
                     }
                 }
-            }.lparams(matchParent, wrapContent)
+                btnSend = button("发送") {
+                    isEnabled = false
+                    onClick {
+                        doAsync {
+                            val isSendOk = sendAppData(etText.text.toString().trim())
+                            logLine(if (isSendOk) "发送成功" else sendError)
+                        }
+                    }
+                }
+            }
+
             scroll = scrollView {
                 tvLog = textView {
                     textSize = sp(8).toFloat()
@@ -143,15 +167,7 @@ open class BaseLinkActivity : AppCompatActivity() {
             }.lparams(matchParent, matchParent)
         }
 
-        // 开启
-        if (appSocket.canWork){
-            appSocket.resetReceive()
-            logLine("启动应用接收 ${appSocket.addr}:${appSocket.port}")
-        }
-        if (groupSocket.canWork){
-            groupSocket.resetSend()
-            logLine("启动组播接收 ${CommConfig.groupIp}:${CommConfig.groupPort}")
-        }
+
     }
 
     private fun clearText(){

@@ -9,6 +9,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ScrollView
 import android.widget.TextView
+import book.hill.gxd.voice.SimpleRecognition
 import org.jetbrains.anko.*
 import org.jetbrains.anko.sdk25.coroutines.onClick
 import org.json.JSONObject
@@ -49,6 +50,13 @@ open class BaseLinkActivity : AppCompatActivity() {
     lateinit var tvLog: TextView
     //endregion
 
+    //region    speech
+    private lateinit var recog: SimpleRecognition
+    private lateinit var recogText:TextView
+    private lateinit var recogName:TextView
+    private var isSpeechWorking = false
+    //endregion
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         //val localIp = BroadcastAddress.getLocalhostIp()
@@ -79,6 +87,40 @@ open class BaseLinkActivity : AppCompatActivity() {
         }
 
         verticalLayout {
+            button("Load"){
+                onClick {
+                    if(!isSpeechWorking) {
+                        recog = SimpleRecognition(this@BaseLinkActivity).apply {
+                            setOnResult { no, text ->
+                                recogText.text = "${no}. $text"
+                            }
+                            setOnName { no, text ->
+                                recogName.text = "${recogName.text}${no}. $text\n"
+                            }
+                        }
+                        clearText()
+                        recog.starApp()
+                        isSpeechWorking = true
+                    }
+                }
+            }
+            button("Close"){
+                onClick {
+                    if (isSpeechWorking) {
+                        isSpeechWorking = false
+                        clearText()
+                        recog.dispose()
+                    }
+                }
+            }
+            recogText = textView {
+                gravity = Gravity.CENTER
+                textSize = sp(10).toFloat()
+            }.lparams(wrapContent, wrapContent)
+            recogName = textView {
+                backgroundColor = Color.GREEN
+                textSize = sp(8).toFloat()
+            }.lparams(matchParent, matchParent)
             etText = editText {
                 hint = "发送内容"
             }.lparams(matchParent, wrapContent)
@@ -109,6 +151,11 @@ open class BaseLinkActivity : AppCompatActivity() {
         }
     }
 
+    private fun clearText(){
+        recogName.text = ""
+        recogText.text = ""
+    }
+
     /**
      * onResume对应onStop
      */
@@ -125,6 +172,9 @@ open class BaseLinkActivity : AppCompatActivity() {
             appSocket.close()
         }
         super.onDestroy()
+        if(isSpeechWorking) {
+            recog.dispose()
+        }
     }
 
     private fun logLine(str: String) {

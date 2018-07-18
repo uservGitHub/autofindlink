@@ -21,13 +21,13 @@
         android:theme="@style/AppTheme">
         <meta-data
             android:name="com.baidu.speech.APP_ID"
-            android:value="1151204" />
+            android:value="11512045" />
         <meta-data
             android:name="com.baidu.speech.API_KEY"
-            android:value="F2ZeozTxZChcLsyG57V6kZM" />
+            android:value="F2ZeozTxZChcLsyG57V6kZMq" />
         <meta-data
             android:name="com.baidu.speech.SECRET_KEY"
-            android:value="DZE4CUgm1yZZhKuhkYG8zAUC3XUbiZr" />
+            android:value="DZE4CUgm1yZZhKuhkYG8zAUC3XUbiZrp" />
         <activity android:name=".MainActivity"
             android:configChanges="keyboardHidden|orientation|screenSize"
             android:windowSoftInputMode="adjustNothing|stateAlwaysHidden">

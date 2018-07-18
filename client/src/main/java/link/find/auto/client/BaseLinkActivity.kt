@@ -87,6 +87,17 @@ open class BaseLinkActivity : AppCompatActivity() {
         }
 
         verticalLayout {
+
+            recogText = textView {
+                gravity = Gravity.CENTER
+                textSize = sp(10).toFloat()
+            }.lparams(wrapContent, wrapContent)
+            scrollView {
+                recogName = textView {
+                    //backgroundColor = Color.GREEN
+                    textSize = sp(8).toFloat()
+                }.lparams(matchParent, matchParent)
+            }.lparams(matchParent, dip(100))
             button("Load"){
                 onClick {
                     if(!isSpeechWorking) {
@@ -113,14 +124,6 @@ open class BaseLinkActivity : AppCompatActivity() {
                     }
                 }
             }
-            recogText = textView {
-                gravity = Gravity.CENTER
-                textSize = sp(10).toFloat()
-            }.lparams(wrapContent, wrapContent)
-            recogName = textView {
-                backgroundColor = Color.GREEN
-                textSize = sp(8).toFloat()
-            }.lparams(matchParent, matchParent)
             etText = editText {
                 hint = "发送内容"
             }.lparams(matchParent, wrapContent)
@@ -135,7 +138,7 @@ open class BaseLinkActivity : AppCompatActivity() {
             }.lparams(matchParent, wrapContent)
             scroll = scrollView {
                 tvLog = textView {
-                    textSize = sp(11).toFloat()
+                    textSize = sp(8).toFloat()
                 }.lparams(matchParent, matchParent)
             }.lparams(matchParent, matchParent)
         }

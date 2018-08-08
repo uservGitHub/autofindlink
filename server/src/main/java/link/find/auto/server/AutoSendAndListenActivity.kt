@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.support.v7.app.AppCompatActivity
+import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -26,12 +27,15 @@ import java.util.concurrent.TimeUnit
 class AutoSendAndListenActivity:AppCompatActivity(){
     var broadcastSocket:GroupBroadcastSocket? = null
     var multicastLock: WifiManager.MulticastLock? = null
-    //键=接收的IP+端口，值=接收该键的次数
-    val recvMap = mutableMapOf<Pair<String,Int>, Int>()
+    //键=接收的IP+端口，值=接收该键的次数的UI显示
+    val recvMap = mutableMapOf<Pair<String,Int>, TextView>()
+    //键=接收到IP地址，值=接收到该键的次数
+    val recvIpMap = mutableMapOf<String, Int>()
     val recvKeyCount = 4
     var applyControl:GroupBroadcastControl? = null
     //region UI
     lateinit var scroll: ScrollView
+    lateinit var panel: LinearLayout
     lateinit var tvLog: TextView
     lateinit var btnAutoSend: Button
     lateinit var btnAutoSendStop: Button
@@ -97,9 +101,13 @@ class AutoSendAndListenActivity:AppCompatActivity(){
                 }.lparams { weight = 1.0F }
             }
             scroll = scrollView {
-                tvLog = textView {
-                    textSize = sp(11).toFloat()
-                }.lparams(matchParent, matchParent)
+                panel = verticalLayout {
+                    orientation = LinearLayout.VERTICAL
+
+                    tvLog = textView {
+                        textSize = sp(8).toFloat()
+                    }.lparams(matchParent, wrapContent)
+                }
             }.lparams(matchParent, matchParent)
         }
     }
@@ -128,16 +136,23 @@ class AutoSendAndListenActivity:AppCompatActivity(){
     protected fun logLine(str: String) {
         val line = if (str.endsWith('\n')) str else "$str\n"
         scroll.post {
-            tvLog.append(line)
+            //tvLog.append(line)
+            tvLog.text = line
             scroll.fullScroll(ScrollView.FOCUS_DOWN)
         }
     }
     protected fun clear(){
         runOnUiThread {
             tvLog.text = "Clear\n"
-            synchronized(recvMap){
-                recvMap.clear()
+        }
+        synchronized(recvMap){
+            runOnUiThread {
+                recvMap.values.forEach {
+                    panel.removeView(it)
+                }
             }
+            recvMap.clear()
+            recvIpMap.clear()
         }
     }
 
@@ -181,20 +196,33 @@ class AutoSendAndListenActivity:AppCompatActivity(){
                     {
                         val msg = String(it.data, it.offset, it.length)
                         val source = Pair<String, Int>(it.address.hostAddress, it.port)
+                        logLine(msg)
+
                         synchronized(recvMap){
                             //不存在
                             if (recvMap.containsKey(source).not()){
-                                recvMap.put(source, 1)
-                                logLine(msg)
+                                runOnUiThread {
+                                    val newLine = TextView(this@AutoSendAndListenActivity).apply {
+                                        textSize = sp(7).toFloat()
+                                        text = "收到 ${source.first} 1 次"
+                                        panel.addView(this, ViewGroup.LayoutParams(matchParent, wrapContent))
+                                    }
+                                    recvMap.put(source, newLine)
+                                }
+                                recvIpMap.put(source.first, 1)
                                 return@synchronized
                             }
-                            //未达上限
-                            val count = recvMap[source]!!
-                            if (count<recvKeyCount){
-                                recvMap[source] = count+1
-                                logLine(msg)
-                                return@synchronized
+
+                            //region    已存在
+                            //更新次数
+                            val count = recvIpMap[source.first]!! + 1
+                            recvIpMap[source.first] = count
+                            //更新次数的显示
+                            runOnUiThread {
+                                val tvSource = recvMap[source]!!
+                                tvSource.text = "收到 ${source.first} $count 次"
                             }
+                            //endregion
                         }
                         //已达到上限，不打印
                         true //继续接收

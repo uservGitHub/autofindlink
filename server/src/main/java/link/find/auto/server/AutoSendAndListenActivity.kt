@@ -173,7 +173,8 @@ class AutoSendAndListenActivity:AppCompatActivity(){
 
         fun startSend(){
             val localEndian = broadcastSocket!!.localIpAndPort
-            val sendMsg = "${localEndian.first}:${localEndian.second} - ${SocketConfigure.localLongIp}"
+            //发广播的IP - 本机最长IP
+            val sendMsg = "广播IP ${localEndian.first}，本地最长IP ${SocketConfigure.localLongIp}"
             canSend = broadcastSocket!!.startSend(
                     sendMsg.toByteArray(),
                     {

@@ -153,8 +153,8 @@ class GroupBroadcastSocket private constructor(){
                     endCallback(CALLBACK_DISPOSE)
                 }
 
-        sendingDisposable = source.subscribeOn(Schedulers.io())
-                .observeOn(Schedulers.io())
+        sendingDisposable = source//.subscribeOn(Schedulers.computation())
+                .observeOn(Schedulers.computation())
                 .subscribe(
                         {},
                         {
@@ -224,7 +224,7 @@ class GroupBroadcastSocket private constructor(){
         }
 
         listeningDisposable = source.subscribeOn(Schedulers.io())
-                .observeOn(Schedulers.io())
+                .observeOn(Schedulers.computation())
                 .subscribe(
                         {},
                         {

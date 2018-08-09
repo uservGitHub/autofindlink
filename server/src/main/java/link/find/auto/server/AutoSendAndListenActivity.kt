@@ -9,16 +9,10 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
-import group.GroupSocket
-import group.IpAndPort
 import group.SocketConfigure
 import gxd.socket.GroupBroadcastSocket
-import io.reactivex.Observable
-import io.reactivex.disposables.Disposable
-import io.reactivex.schedulers.Schedulers
 import org.jetbrains.anko.*
 import org.jetbrains.anko.sdk25.coroutines.onClick
-import java.util.concurrent.TimeUnit
 
 /**
  * 默认自动接收/发送组播

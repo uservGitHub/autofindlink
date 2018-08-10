@@ -5,13 +5,14 @@ import io.reactivex.Observable
 import io.reactivex.disposables.Disposable
 import io.reactivex.schedulers.Schedulers
 import java.net.DatagramPacket
+import java.net.DatagramSocket
 import java.net.InetAddress
 import java.net.MulticastSocket
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 /**
- * Udp传输
+ * Udp传输，发送和接收只能开一个
  * 基本约定：
  * 一、进入交互的情况下：
  * 1 要断开停止发送即可（250毫秒超时结束）
@@ -22,7 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * 2 如何进入交互状态？一端向另一端执行发送操作
  * 3 交互完成？收到接收方结束标志，或超时
  */
-class UdpTransfer{
+class UdpTransfer private constructor(localIp: String, localPort:Int){
     companion object {
         val HAND_BEG_SIZE:Byte = 11 //开始时，数据大小
         val HAND_ID_REQ:Byte = 12 //请求的数据ID
@@ -48,10 +49,21 @@ class UdpTransfer{
         val DATAUNIT_SIZE = 1400 //数据单位大小，不含ID
 
         //回调标志
-        val CALLBACK_COMPLETE = 1
+        //val CALLBACK_COMPLETE = 1
         val CALLBACK_ERROR = 2
         val CALLBACK_DISPOSE = 3
         val CALLBACK_FINISH = 4
+
+        val STATE_RECV_END = 1 //接收结束（成功、错误、或取消）
+        val STATE_SEND_END = 2 //发送结束（成功、错误、或取消）
+
+        val RET_CODE_THROW = 1 //返回状态码，异常
+        val RET_CODE_TIMEOUT = 2 //返回状态码，超时
+        val RET_CODE_CHECK = 3 //返回状态码，校验错误
+        val RET_CODE_OK = 4 //返回状态码，成功
+        val RET_CODE_IGNORE = 5 //返回状态码，忽略
+
+
     }
     /**
      * 能否工作
@@ -62,12 +74,12 @@ class UdpTransfer{
         private set
     var localIpAndPort: Pair<String, Int> = Pair("", 0)
         private set
-    private lateinit var socket: MulticastSocket
+    private lateinit var socket: DatagramSocket
     private var listeningDisposable: Disposable? = null
     private var sendingDisposable: Disposable? = null
 
-    private var onFinishSend:((endCode:Int)->Unit)? = null
-    private var onFinishRecv:((endCode:Int)->Unit)? = null
+    //private var onFinishSend:((endCode:Int)->Unit)? = null
+    //private var onFinishRecv:((endCode:Int)->Unit)? = null
 
     @Volatile
     var isSending = false //只能是发送线程修改
@@ -80,11 +92,7 @@ class UdpTransfer{
         private set
     @Volatile
     private var recvOkTick = 0L //接收OK的时刻，只能接收线程修改
-    @Volatile
-    private var isCheckTimeout = false //是否校验超时，由状态机开启，并设置recvOkTick
-    @Volatile
-    private var requestId = -1 //由接收端赋值
-    private var timeoutCount = 0 //超时数量
+
     private var onLogLine:((String)->Unit)? = null
     /**
      * 关键信息输出格式
@@ -102,12 +110,7 @@ class UdpTransfer{
     }
     init {
         try {
-            socket = MulticastSocket(GroupBroadcastSocket.GROUP_PORT).apply {
-                // 如果只是发送组播，上面的端口号和下面的三项内容不需要
-                joinGroup(InetAddress.getByName(GroupBroadcastSocket.GROUP_IP))
-                timeToLive = 128 //本地网络一般不需要
-                loopbackMode = false //非回环网络
-            }
+            socket = DatagramSocket(localPort, InetAddress.getByName(localIp))
             localIpAndPort = Pair(socket.localAddress.hostAddress, socket.localPort)
             canWork = true
         } catch (e: Exception) {
@@ -140,7 +143,7 @@ class UdpTransfer{
             socket.close()
         }
     }
-    private fun pack(handType: Byte, value:Int) = byteArrayOf(handType,0,*value.toByteArray(4))
+
     /**
      * 启动发送
      * @param appBuffer 应用数据流
@@ -148,8 +151,8 @@ class UdpTransfer{
      * @param speed 发送速度（字节数/每秒）
      * @return 是否正常启动发送
      */
-    fun startSend(appBuffer: ByteArray,remoteIp:String, remotePort:Int, endCallback:(callbackKey:Int)->Unit, speed:(bytesPerSecond:Int)->Unit):Boolean {
-        if (canWork.not() || isSending) {
+    fun startSendBuffer(appBuffer: ByteArray,remoteIp:String, remotePort:Int, endCallback:(callbackKey:Int)->Unit, speed:(bytesPerSecond:Int)->Unit):Boolean {
+        if (canWork.not() || isSending || isRecving) {
             return false
         }
         if (sendingDisposable != null && sendingDisposable!!.isDisposed.not()) {
@@ -159,84 +162,180 @@ class UdpTransfer{
 
         val inetAddress = InetAddress.getByName(remoteIp)
 
-
-        //启动即可，剩下的靠监听来完成
-        val source = Observable.create<Unit> {
-            var sendPackCount = 0
-            while (canWork && it.isDisposed.not()) {
+        //启动源
+        val sourceStart = Observable.create<Int> {
+            var sendPackCount = 0 //重发次数
+            while (it.isDisposed.not()){ //canWork已检查，去掉
                 when(state){
                     0 -> {
-                        //可以开启
                         bufferControl = BufferControl(appBuffer, inetAddress, remotePort)
-                        this.onFinishSend = endCallback
                         state = 22_01
-                        bufferControl!!.sendTagBeg()
                         sendPackCount = 0
                     }
                     22_01 -> {
-                        if (sendPackCount < 4) {
+                        //最多发送3次间隔50毫秒，第4次结束
+                        if (sendPackCount<3){
                             sendPackCount++
                             Thread.sleep(50)
-                            if (bufferControl!!.idFromSend <= 0) {
-                                bufferControl!!.sendTagBeg()
-                            }else{
-                                sendPackCount = 4
-                            }
+                            bufferControl!!.sendTagBeg()
+                        }else{
+                            return@create
                         }
                     }
-                    22_03 -> {
-                        state = 0
-                        endCallback(CALLBACK_FINISH)
-                        //onFinishSend!!.invoke(CALLBACK_FINISH)
-                        isSending = false
+                    else -> {
+                        //后续状态流转处理已启动，结束
+                        return@create
                     }
                 }
             }
-            it.onComplete()
-        } .doOnDispose {
-            try {
-                onLogLine?.invoke(keyLog("Dispose"))
-            } catch (e: Exception) {
-
+        }
+        //响应式接收源
+        val sourceRespond = Observable.create<Int> {
+            while (it.isDisposed.not()){
+                //动态分配，最大
+                val buf = ByteArray(DATAUNIT_SIZE + 6)
+                val packet = DatagramPacket(buf, buf.size)
+                var isRecvError = false //中断本次接收任务
+                try {
+                    socket.receive(packet)
+                } catch (e: Exception) {
+                    isRecvError = true
+                }
+                //跳出
+                if (it.isDisposed){
+                    break
+                }
+                //汇报并中断任务处理
+                if (isRecvError){
+                    it.onNext(RET_CODE_THROW)
+                    break
+                }
+                when(state){
+                    22_01, 22_02 -> {
+                        if (state == 22_01){
+                            state = 22_02
+                        }
+                        when(getHandType(packet)){
+                            HAND_ID_REQ -> {
+                                recvOkTick = System.currentTimeMillis()
+                                val dataId = getDataId(packet)
+                                bufferControl!!.send(dataId)
+                            }
+                            HAND_END_SIZE -> {
+                                recvOkTick = System.currentTimeMillis()
+                                val size = getDataId(packet)
+                                if (size != bufferControl!!.buf.size){
+                                    //数量不符，上报
+                                    it.onNext(RET_CODE_CHECK)
+                                }else{
+                                    //结束
+                                    state = STATE_SEND_END
+                                    it.onNext(RET_CODE_OK)
+                                }
+                                return@create
+                            }
+                        }
+                    }
+                }
             }
-            endCallback(CALLBACK_DISPOSE)
+        }.subscribeOn(Schedulers.newThread()) //局域网的响应速度快，不用IO线程
+        //超时判断源
+        val sourceCheckTimeout = Observable.interval(250, TimeUnit.MICROSECONDS)
+                .map {
+                    val timeSpan = System.currentTimeMillis() - recvOkTick
+                    if (timeSpan > 250) RET_CODE_TIMEOUT
+                    else RET_CODE_IGNORE
+                }
+
+        //启动时，复位状态机
+        when(state){
+            0, STATE_RECV_END, STATE_SEND_END -> {
+                //可以启动，复位状态机，启动
+                state = 0
+                val source = Observable.merge(listOf(sourceStart,sourceRespond,sourceCheckTimeout))
+                sendingDisposable = source//.subscribeOn(Schedulers.computation())
+                        .observeOn(Schedulers.computation())
+                        .doOnDispose {
+                            if (state != RET_CODE_OK) {
+                                try {
+                                    onLogLine?.invoke(keyLog("Dispose"))
+                                } catch (e: Exception) {
+
+                                }
+                                try {
+                                    endCallback(CALLBACK_DISPOSE)
+                                } catch (e: Exception) {
+
+                                }
+                            }
+                            isSending = false
+                        }
+                        .subscribe(
+                                {
+                                    when(it){
+                                        RET_CODE_OK -> {
+                                            //完成
+                                            stopSend()
+                                            try {
+                                                onLogLine?.invoke(keyLog("Finish"))
+                                            } catch (e: Exception) {
+
+                                            }
+                                            try {
+                                                endCallback(CALLBACK_FINISH)
+                                            }catch (e:Exception){
+
+                                            }
+                                            isSending = false
+                                        }
+                                        RET_CODE_IGNORE -> {}
+                                        else ->{
+                                            try {
+                                                onLogLine?.invoke(keyLog("Error"))
+                                            } catch (e: Exception) {
+
+                                            }
+                                            try {
+                                                endCallback(CALLBACK_ERROR)
+                                            }catch (e:Exception){
+
+                                            }
+                                            isSending = false
+                                        }
+                                    }
+                                },
+                                {
+                                    try {
+                                        onLogLine?.invoke(keyLog("Error"))
+                                    } catch (e: Exception) {
+
+                                    }
+                                    try {
+                                        endCallback(CALLBACK_ERROR)
+                                    }catch (e:Exception){
+
+                                    }
+                                    isSending = false
+                                }
+                        )
+                return true
+            }
         }
 
-        sendingDisposable = source//.subscribeOn(Schedulers.computation())
-                .observeOn(Schedulers.computation())
-                .subscribe(
-                        {},
-                        {
-                            try {
-                                onLogLine?.invoke(keyLog("Error"))
-                            } catch (e: Exception) {
+        return false
 
-                            }
-                            endCallback(CALLBACK_ERROR)
-                        },
-                        {
-                            try {
-                                onLogLine?.invoke(keyLog("Complete"))
-                            } catch (e: Exception) {
-
-                            }
-                            endCallback(CALLBACK_COMPLETE)
-                        }
-                )
-        return true
     }
 
     fun startListenBuffer(endCallback: (callbackKey: Int) -> Unit):Boolean{
-        if (canWork.not()) {
+        if (canWork.not() || isRecving || isSending) {
             return false
         }
         if (listeningDisposable != null && listeningDisposable!!.isDisposed.not()) {
             return true
         }
-        this.onFinishRecv = endCallback
+        isRecving = true
 
-        //永远接收，除非 关闭
-        val source = Observable.create<Unit> {
+        val sourceStart = Observable.create<Int> {
             while (it.isDisposed.not()) {
                 //动态分配，最大
                 val buf = ByteArray(DATAUNIT_SIZE + 6)
@@ -251,40 +350,28 @@ class UdpTransfer{
                 if (it.isDisposed){
                     break
                 }
-                //中断任务处理
-                if (isRecvError || timeoutCount>0){
-                    state = 0
-                    isRecving = false
-                    //上报
-                    //...
-                    continue
+                //汇报并中断任务处理
+                if (isRecvError){
+                    it.onNext(RET_CODE_THROW)
+                    break
                 }
-
-                //region    状态机(由接收状态为始点)
                 if (isSending.not()) {
                     when (state) {
                         0 -> {
                             when (getHandType(packet)) {
                                 HAND_BEG_SIZE -> {
                                     state = 11_01
-                                    isRecving = true
                                     recvOkTick = System.currentTimeMillis()
-                                    timeoutCount = 0
-                                    isCheckTimeout = true
-
                                     try {
                                         val buf = ByteArray(packet.data.toInt(packet.offset + 2, 4))
                                         bufferControl = BufferControl(buf, packet.address, packet.port)
                                         bufferControl!!.request(bufferControl!!.idFromRecv.get())
                                     } catch (e: Exception) {
-                                        e.printStackTrace()
                                         //可能是申请内存失败
                                         //要上报
+                                        it.onNext(RET_CODE_THROW)
+                                        return@create
                                     }
-                                }
-                                else -> {
-                                    //不该有的分支
-                                    //...
                                 }
                             }
                         }
@@ -293,21 +380,18 @@ class UdpTransfer{
                                 HAND_ID_DATA -> {
                                     val canWrite = bufferControl!!.write(packet)
                                     if (canWrite.not()) {
-                                        //打印错误信息
+                                        //退出
+                                        it.onNext(RET_CODE_THROW)
+                                        return@create
                                     } else {
                                         recvOkTick = System.currentTimeMillis()
                                     }
                                     if (bufferControl!!.idFromRecv.get() == bufferControl!!.dataUnitSize) {
-                                        //结束
-                                        //执行回调
-                                        try {
-                                            endCallback(CALLBACK_FINISH)
-                                        }finally {
-                                            state = 11_02 //接收完毕
-                                            bufferControl!!.sendTagEnd()
-                                            Thread.sleep(10)
-                                            bufferControl!!.sendTagEnd()
-                                        }
+                                        //转结束
+                                        state = STATE_RECV_END
+                                        bufferControl!!.sendTagEnd()
+                                        it.onNext(RET_CODE_OK)
+                                        return@create
                                     } else {
                                         bufferControl!!.request(bufferControl!!.idFromRecv.get())
                                     }
@@ -316,94 +400,94 @@ class UdpTransfer{
                         }
                     }
                 }
-                if (isSending){
-                    when(state){
-                        22_01, 22_02 -> {
-                            when(getHandType(packet)){
-                                HAND_ID_REQ -> {
-                                    recvOkTick = System.currentTimeMillis()
-                                    val dataId = getDataId(packet)
-                                    bufferControl!!.send(dataId)
-                                    if (state == 22_01){
-                                        state == 22_02
-                                    }
-                                }
-                                HAND_END_SIZE -> {
-                                    val size = getDataId(packet)
-                                    if (size != bufferControl!!.buf.size){
-                                        //数量不符，上报
-                                    }else{
-                                        recvOkTick = System.currentTimeMillis()
-                                        //结束
-                                        isCheckTimeout = false
-                                        state = 22_03 //发送完毕，返回发送任务
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
                 //endregion
             }
-        }.doOnDispose {
-            try {
-                onLogLine?.invoke(keyLog("Dispose"))
-            } catch (e: Exception) {
+        }.subscribeOn(Schedulers.newThread())
 
-            }
-            try {
-                endCallback(CALLBACK_DISPOSE)
-            }catch (e:Exception){
+        val sourceReqAndTimeout = Observable.interval(100, TimeUnit.MICROSECONDS)
+                .map {
+                    val timeSpan = System.currentTimeMillis() - recvOkTick
+                    if (timeSpan > 250) RET_CODE_TIMEOUT
+                    else{
+                        //重新请求
+                        bufferControl!!.request(bufferControl!!.idFromRecv.get())
+                        RET_CODE_IGNORE
+                    }
+                }
+        when(state){
+            0, STATE_SEND_END, STATE_RECV_END ->{
+                //可以启动，复位状态机，启动
+                state = 0
+                val source = Observable.merge(listOf(sourceStart,sourceReqAndTimeout))
+                sendingDisposable = source//.subscribeOn(Schedulers.computation())
+                        .observeOn(Schedulers.computation())
+                        .doOnDispose {
+                            if (state != RET_CODE_OK) {
+                                try {
+                                    onLogLine?.invoke(keyLog("Dispose"))
+                                } catch (e: Exception) {
 
-            }
-        }
+                                }
+                                try {
+                                    endCallback(CALLBACK_DISPOSE)
+                                } catch (e: Exception) {
 
-        listeningDisposable = source.subscribeOn(Schedulers.io())
-                .observeOn(Schedulers.computation())
-                .subscribe(
-                        {},
-                        {
-                            try {
-                                onLogLine?.invoke(keyLog("Error"))
-                            } catch (e: Exception) {
-
+                                }
                             }
-                            try {
-                                endCallback(CALLBACK_ERROR)
-                            }catch (e:Exception){
-
-                            }
-                        },
-                        {
-                            //没有完成状态
-                            /*try {
-                                onLogLine?.invoke(keyLog("Complete"))
-                            } catch (e: Exception) {
-
-                            }
-                            try {
-                                endCallback(CALLBACK_COMPLETE)
-                            }catch (e:Exception){
-
-                            }*/
-                        },
-                        {
-                            //启动接收时的初始态
-                            state = 0
                             isRecving = false
                         }
-                )
+                        .subscribe(
+                                {
+                                    when(it){
+                                        RET_CODE_OK -> {
+                                            //完成
+                                            stopSend()
+                                            try {
+                                                onLogLine?.invoke(keyLog("Finish"))
+                                            } catch (e: Exception) {
 
-        val sourceCheckTimeout = Observable.interval(250, TimeUnit.MICROSECONDS)
-                .doOnNext {
-                    if (isCheckTimeout){
-                        val timeSpan = System.currentTimeMillis() - recvOkTick
-                        if (timeSpan > 250){
-                            timeoutCount++
-                        }
-                    }
-                }.subscribe()
-        return true
+                                            }
+                                            try {
+                                                endCallback(CALLBACK_FINISH)
+                                            }catch (e:Exception){
+
+                                            }
+                                            isRecving = false
+                                        }
+                                        RET_CODE_IGNORE -> {}
+                                        else ->{
+                                            try {
+                                                onLogLine?.invoke(keyLog("Error"))
+                                            } catch (e: Exception) {
+
+                                            }
+                                            try {
+                                                endCallback(CALLBACK_ERROR)
+                                            }catch (e:Exception){
+
+                                            }
+                                            isRecving = false
+                                        }
+                                    }
+                                },
+                                {
+                                    try {
+                                        onLogLine?.invoke(keyLog("Error"))
+                                    } catch (e: Exception) {
+
+                                    }
+                                    try {
+                                        endCallback(CALLBACK_ERROR)
+                                    }catch (e:Exception){
+
+                                    }
+                                    isRecving = false
+                                }
+                        )
+                return true
+            }
+        }
+        return false
     }
 
 

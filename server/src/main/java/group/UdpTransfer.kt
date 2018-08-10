@@ -1,13 +1,11 @@
 package group
 
-import gxd.socket.GroupBroadcastSocket
 import io.reactivex.Observable
 import io.reactivex.disposables.Disposable
 import io.reactivex.schedulers.Schedulers
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.net.MulticastSocket
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -63,8 +61,18 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
         val RET_CODE_OK = 4 //返回状态码，成功
         val RET_CODE_IGNORE = 5 //返回状态码，忽略
 
-
+        fun create():UdpTransfer {
+            val ip = SocketConfigure.localIps.first()
+            return UdpTransfer(ip, 0)
+        }
+        fun create(localPort:Int):UdpTransfer {
+            val ip = SocketConfigure.localIps.first()
+            return UdpTransfer(ip, localPort)
+        }
+        fun create(localIp:String) = UdpTransfer(localIp, 0)
+        fun create(localIp: String, localPort: Int) = UdpTransfer(localIp, localPort)
     }
+
     /**
      * 能否工作
      */
@@ -176,8 +184,8 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                         //最多发送3次间隔50毫秒，第4次结束
                         if (sendPackCount<3){
                             sendPackCount++
-                            Thread.sleep(50)
                             bufferControl!!.sendTagBeg()
+                            Thread.sleep(50)
                         }else{
                             return@create
                         }
@@ -240,10 +248,10 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             }
         }.subscribeOn(Schedulers.newThread()) //局域网的响应速度快，不用IO线程
         //超时判断源
-        val sourceCheckTimeout = Observable.interval(250, TimeUnit.MICROSECONDS)
+        val sourceCheckTimeout = Observable.interval(2_500, TimeUnit.MICROSECONDS)
                 .map {
                     val timeSpan = System.currentTimeMillis() - recvOkTick
-                    if (timeSpan > 250) RET_CODE_TIMEOUT
+                    if (timeSpan > 250 && state != STATE_SEND_END)RET_CODE_TIMEOUT
                     else RET_CODE_IGNORE
                 }
 
@@ -252,11 +260,12 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             0, STATE_RECV_END, STATE_SEND_END -> {
                 //可以启动，复位状态机，启动
                 state = 0
-                val source = Observable.merge(listOf(sourceStart,sourceRespond,sourceCheckTimeout))
+                var selfDisposed = false
+                val source = Observable.merge(listOf(sourceRespond,sourceStart,sourceCheckTimeout))
                 sendingDisposable = source//.subscribeOn(Schedulers.computation())
                         .observeOn(Schedulers.computation())
                         .doOnDispose {
-                            if (state != RET_CODE_OK) {
+                            if (selfDisposed.not()) {
                                 try {
                                     onLogLine?.invoke(keyLog("Dispose"))
                                 } catch (e: Exception) {
@@ -268,13 +277,13 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
 
                                 }
                             }
-                            isSending = false
                         }
                         .subscribe(
                                 {
                                     when(it){
                                         RET_CODE_OK -> {
                                             //完成
+                                            selfDisposed = true
                                             stopSend()
                                             try {
                                                 onLogLine?.invoke(keyLog("Finish"))
@@ -286,10 +295,11 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                                             }catch (e:Exception){
 
                                             }
-                                            isSending = false
                                         }
                                         RET_CODE_IGNORE -> {}
                                         else ->{
+                                            selfDisposed = true
+                                            stopSend()
                                             try {
                                                 onLogLine?.invoke(keyLog("Error"))
                                             } catch (e: Exception) {
@@ -300,7 +310,6 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                                             }catch (e:Exception){
 
                                             }
-                                            isSending = false
                                         }
                                     }
                                 },
@@ -355,17 +364,19 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                     it.onNext(RET_CODE_THROW)
                     break
                 }
+
                 if (isSending.not()) {
+                    val handType = getHandType(packet)
                     when (state) {
                         0 -> {
-                            when (getHandType(packet)) {
+                            when (handType) {
                                 HAND_BEG_SIZE -> {
                                     state = 11_01
                                     recvOkTick = System.currentTimeMillis()
                                     try {
                                         val buf = ByteArray(packet.data.toInt(packet.offset + 2, 4))
                                         bufferControl = BufferControl(buf, packet.address, packet.port)
-                                        bufferControl!!.request(bufferControl!!.idFromRecv.get())
+                                        bufferControl!!.request(bufferControl!!.idFromRecv.get() + 1)
                                     } catch (e: Exception) {
                                         //可能是申请内存失败
                                         //要上报
@@ -376,7 +387,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                             }
                         }
                         11_01 -> {
-                            when (getHandType(packet)) {
+                            when (handType) {
                                 HAND_ID_DATA -> {
                                     val canWrite = bufferControl!!.write(packet)
                                     if (canWrite.not()) {
@@ -386,14 +397,15 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                                     } else {
                                         recvOkTick = System.currentTimeMillis()
                                     }
-                                    if (bufferControl!!.idFromRecv.get() == bufferControl!!.dataUnitSize) {
+                                    val idFromRecv = bufferControl!!.idFromRecv.get()
+                                    if (idFromRecv == bufferControl!!.dataUnitSize) {
                                         //转结束
                                         state = STATE_RECV_END
                                         bufferControl!!.sendTagEnd()
                                         it.onNext(RET_CODE_OK)
                                         return@create
-                                    } else {
-                                        bufferControl!!.request(bufferControl!!.idFromRecv.get())
+                                    } else if (idFromRecv < bufferControl!!.dataUnitSize) {
+                                        bufferControl!!.request(bufferControl!!.idFromRecv.get() + 1)
                                     }
                                 }
                             }
@@ -404,25 +416,25 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             }
         }.subscribeOn(Schedulers.newThread())
 
-        val sourceReqAndTimeout = Observable.interval(100, TimeUnit.MICROSECONDS)
+        val sourceReqAndTimeout = Observable.interval(2_500, TimeUnit.MICROSECONDS)
                 .map {
-                    val timeSpan = System.currentTimeMillis() - recvOkTick
-                    if (timeSpan > 250) RET_CODE_TIMEOUT
-                    else{
-                        //重新请求
-                        bufferControl!!.request(bufferControl!!.idFromRecv.get())
-                        RET_CODE_IGNORE
+                    //启动的情况下，才执行超时判断
+                    if (state != 0) {
+                        val timeSpan = System.currentTimeMillis() - recvOkTick
+                        if (timeSpan > 250) return@map RET_CODE_TIMEOUT
                     }
+                    RET_CODE_IGNORE
                 }
         when(state){
             0, STATE_SEND_END, STATE_RECV_END ->{
                 //可以启动，复位状态机，启动
                 state = 0
+                var selfDisposed = false
                 val source = Observable.merge(listOf(sourceStart,sourceReqAndTimeout))
-                sendingDisposable = source//.subscribeOn(Schedulers.computation())
+                listeningDisposable = source//.subscribeOn(Schedulers.computation())
                         .observeOn(Schedulers.computation())
                         .doOnDispose {
-                            if (state != RET_CODE_OK) {
+                            if (selfDisposed.not()) {
                                 try {
                                     onLogLine?.invoke(keyLog("Dispose"))
                                 } catch (e: Exception) {
@@ -441,7 +453,8 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                                     when(it){
                                         RET_CODE_OK -> {
                                             //完成
-                                            stopSend()
+                                            selfDisposed = true
+                                            stopListen()
                                             try {
                                                 onLogLine?.invoke(keyLog("Finish"))
                                             } catch (e: Exception) {
@@ -456,6 +469,8 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                                         }
                                         RET_CODE_IGNORE -> {}
                                         else ->{
+                                            selfDisposed = true
+                                            stopListen()
                                             try {
                                                 onLogLine?.invoke(keyLog("Error"))
                                             } catch (e: Exception) {
@@ -523,6 +538,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                     if (dataRemSize == 0) 0 else 1
             dataLastSize = dataRemSize.takeIf { it > 0 } ?: DATAUNIT_SIZE
             idFromRecv = AtomicInteger(0)
+            println("${localIpAndPort.first} 最大单元号：$dataUnitSize")
         }
 
         /**
@@ -533,6 +549,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             sendBuf[0] = HAND_BEG_SIZE
             sendBuf.fromInt(buf.size, 2, 4)
             val packet = DatagramPacket(sendBuf, sendBuf.size, inetAddress, remotePort)
+            println("${localIpAndPort.first} 发送：Beg")
             socket.send(packet)
         }
 
@@ -544,6 +561,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             sendBuf[0] = HAND_END_SIZE
             sendBuf.fromInt(buf.size, 2, 4)
             val packet = DatagramPacket(sendBuf, sendBuf.size, inetAddress, remotePort)
+            println("${localIpAndPort.first} 发送End")
             socket.send(packet)
         }
 
@@ -558,7 +576,8 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             sendBuf.fromInt(dataId,2,4)
             val length = if (dataId == dataUnitSize) dataLastSize else DATAUNIT_SIZE
             System.arraycopy(buf,(dataId-1)* DATAUNIT_SIZE,sendBuf,6,length)
-            val packet = DatagramPacket(buf, buf.size, inetAddress, remotePort)
+            val packet = DatagramPacket(sendBuf, sendBuf.size, inetAddress, remotePort)
+            println("${localIpAndPort.first} 响应：$dataId")
             socket.send(packet)
         }
 
@@ -571,6 +590,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             sendBuf[0] = HAND_ID_REQ
             sendBuf.fromInt(dataId, 2, 4)
             val packet = DatagramPacket(sendBuf, sendBuf.size, inetAddress, remotePort)
+            println("${localIpAndPort.first} 请求：$dataId")
             socket.send(packet)
         }
 
@@ -579,11 +599,13 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
          * @param packet 用户报
          */
         fun write(packet: DatagramPacket):Boolean {
+
             //数据长度正确，且交互状态正确
             if (packet.length == DATAUNIT_SIZE + 6 && packet.data[packet.offset] == HAND_ID_DATA) {
                 val id = packet.data.toInt(packet.offset + 2, 4)
                 //id 是当前接收标志+1
-                if (id - idFromRecv.get() == 1) {
+                val offset = id - idFromRecv.get()
+                if (offset == 1) {
                     //更新接收标志
                     val dataId = idFromRecv.addAndGet(1)
                     val length = if (dataId == dataUnitSize) dataLastSize else DATAUNIT_SIZE
@@ -591,7 +613,10 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                             buf, (dataId - 1) * DATAUNIT_SIZE, length)
                     return true
                 }
+                println("${localIpAndPort.first} 写入错误：$offset")
+                return true
             }
+            println("${localIpAndPort.first} 写入错误：包错误")
             return false
         }
     }

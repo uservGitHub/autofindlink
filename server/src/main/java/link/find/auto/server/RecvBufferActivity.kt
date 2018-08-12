@@ -62,7 +62,7 @@ class RecvBufferActivity:AppCompatActivity(){
                     tvIpPort = textView{
                         textSize = sp(8).toFloat()
                         val ipport = udpTransfer.localIpAndPort
-                        text = "${ipport.first}:${ipport.second}"
+                        text = "${ipport.first}:${ipport.second} ${udpTransfer.localHostName}"
                     }
                     tvLog = textView {
                         textSize = sp(8).toFloat()

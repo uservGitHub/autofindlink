@@ -82,6 +82,8 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
         private set
     var localIpAndPort: Pair<String, Int> = Pair("", 0)
         private set
+    var localHostName: String = ""
+        private set
     private lateinit var socket: DatagramSocket
     private var listeningDisposable: Disposable? = null
     private var sendingDisposable: Disposable? = null
@@ -120,6 +122,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
         try {
             socket = DatagramSocket(localPort, InetAddress.getByName(localIp))
             localIpAndPort = Pair(socket.localAddress.hostAddress, socket.localPort)
+            localHostName = "[${socket.localAddress.hostName}][${socket.localAddress.canonicalHostName}]"
             canWork = true
         } catch (e: Exception) {
             e.printStackTrace()
@@ -248,10 +251,10 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             }
         }.subscribeOn(Schedulers.newThread()) //局域网的响应速度快，不用IO线程
         //超时判断源
-        val sourceCheckTimeout = Observable.interval(2_500, TimeUnit.MICROSECONDS)
+        val sourceCheckTimeout = Observable.interval(1_000, TimeUnit.MICROSECONDS)
                 .map {
                     val timeSpan = System.currentTimeMillis() - recvOkTick
-                    if (timeSpan > 250 && state != STATE_SEND_END)RET_CODE_TIMEOUT
+                    if (timeSpan > 2000 && state != STATE_SEND_END)RET_CODE_TIMEOUT
                     else RET_CODE_IGNORE
                 }
 
@@ -374,8 +377,8 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
                                     state = 11_01
                                     recvOkTick = System.currentTimeMillis()
                                     try {
-                                        val buf = ByteArray(packet.data.toInt(packet.offset + 2, 4))
-                                        bufferControl = BufferControl(buf, packet.address, packet.port)
+                                        val reqBuf = ByteArray(packet.data.toInt(packet.offset + 2, 4))
+                                        bufferControl = BufferControl(reqBuf, packet.address, packet.port)
                                         bufferControl!!.request(bufferControl!!.idFromRecv.get() + 1)
                                     } catch (e: Exception) {
                                         //可能是申请内存失败
@@ -416,12 +419,17 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             }
         }.subscribeOn(Schedulers.newThread())
 
-        val sourceReqAndTimeout = Observable.interval(2_500, TimeUnit.MICROSECONDS)
+        val sourceReqAndTimeout = Observable.interval(500, TimeUnit.MICROSECONDS)
                 .map {
                     //启动的情况下，才执行超时判断
                     if (state != 0) {
                         val timeSpan = System.currentTimeMillis() - recvOkTick
-                        if (timeSpan > 250) return@map RET_CODE_TIMEOUT
+                        if (timeSpan>100){
+                            //重新请求
+                            bufferControl!!.request(bufferControl!!.idFromRecv.get() + 1)
+                            return@map RET_CODE_IGNORE
+                        }
+                        if (timeSpan > 1500) return@map RET_CODE_TIMEOUT
                     }
                     RET_CODE_IGNORE
                 }
@@ -577,7 +585,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             val length = if (dataId == dataUnitSize) dataLastSize else DATAUNIT_SIZE
             System.arraycopy(buf,(dataId-1)* DATAUNIT_SIZE,sendBuf,6,length)
             val packet = DatagramPacket(sendBuf, sendBuf.size, inetAddress, remotePort)
-            println("${localIpAndPort.first} 响应：$dataId")
+            //println("${localIpAndPort.first} 响应：$dataId")
             socket.send(packet)
         }
 
@@ -590,7 +598,7 @@ class UdpTransfer private constructor(localIp: String, localPort:Int){
             sendBuf[0] = HAND_ID_REQ
             sendBuf.fromInt(dataId, 2, 4)
             val packet = DatagramPacket(sendBuf, sendBuf.size, inetAddress, remotePort)
-            println("${localIpAndPort.first} 请求：$dataId")
+            //println("${localIpAndPort.first} 请求：$dataId")
             socket.send(packet)
         }
 

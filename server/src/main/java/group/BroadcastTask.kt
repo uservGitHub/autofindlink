@@ -74,7 +74,7 @@ class BroadcastTask {
         }
     }
 
-    fun startSend(initDealy:Long, period:Long,count:Int, ip:ByteArray, port:Int):Boolean {
+    fun startSend(initDealy:Long, period:Long,count:Int, port:Int,doOnAfterSend:(Int)->Unit ,endCallback:()->Unit):Boolean {
         if (thread != null) {
             return type == 2
         }
@@ -82,25 +82,27 @@ class BroadcastTask {
             thread = Thread({
                 try {
                     if (initDealy > 0) {
-                        sleep(initDealy)
+                        Thread.sleep(initDealy)
                     }
                     val buf = ByteArray(2+4).apply {
                         fromInt(port,2,4)
                     }
-                    socket = MulticastSocket(GROUP_PORT).apply {
+                    /*socket = MulticastSocket(GROUP_PORT).apply {
                         // 如果只是发送组播，上面的端口号和下面的三项内容不需要
                         joinGroup(InetAddress.getByName(GROUP_IP))
                         timeToLive = 128 //本地网络一般不需要
                         loopbackMode = false //非回环网络
-                    }
-                    val packet = DatagramPacket(buf, buf.size, InetAddress.getByAddress(ip), port)
+                    }*/
+                    socket = MulticastSocket()
+                    val packet = DatagramPacket(buf, buf.size, InetAddress.getByName(GROUP_IP), GROUP_PORT)
                     var i = 0
                     while (isStop.not() && i<count) {
-                        socket?.send(packet)
+                        socket!!.send(packet)
                         i++
                         if (i >= count || isStop) {
                             return@Thread
                         }
+                        doOnAfterSend.invoke(i)
                         Thread.sleep(period)
                     }
                 }
@@ -108,6 +110,7 @@ class BroadcastTask {
                 {
 
                 }finally {
+                    endCallback.invoke()
                     socket?.close()
                     socket = null
                     type = 0
@@ -125,7 +128,7 @@ class BroadcastTask {
         return false
     }
 
-    fun startListen(): Boolean {
+    fun startListen(errorCallback:()->Unit): Boolean {
         if (thread != null) {
             return type == 1
         }
@@ -152,7 +155,8 @@ class BroadcastTask {
                         Thread.yield()
                     }
                 }catch (e:Exception){
-
+                    isStop = true
+                    errorCallback.invoke()
                 }
                 finally {
                     onStopListenAfter?.invoke()
@@ -173,11 +177,11 @@ class BroadcastTask {
         return false
     }
 
-    inline fun sleep(ms: Long) {
+    /*inline fun sleep(ms: Long) {
         try {
             Thread.sleep(ms)
         } catch (e: Exception) {
 
         }
-    }
+    }*/
 }
